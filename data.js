@@ -27,7 +27,6 @@ function generateDummyMembers(count) {
     const seq = pad(((i * 7) % 400) + 1, 4);
     const day = pad((i % 28) + 1, 2);
 
-    // masaAktif: sebagian di masa lalu (Tidak Aktif), sebagian di masa depan (Aktif)
     const expiryYear = aktif ? 2026 + (i % 2) : 2024;
     const masaAktif = `${expiryYear}-${month}-${day}`;
 
@@ -52,14 +51,65 @@ function generateDummyMembers(count) {
 
 const DUMMY_MEMBERS = generateDummyMembers(48);
 
+// ==================== CUSTOM DATE PARSER SMART ====================
+// Berfungsi mengenali format: YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY, & DD NamaBulan YYYY
+function parseDateCustom(dateStr) {
+  if (!dateStr) return null;
+  
+  let str = dateStr.trim().replace(/\s+/g, ' ');
+  
+  // Kamus Bulan Indonesia & Inggris
+  const monthMap = {
+    jan: 0, januari: 0, january: 0,
+    feb: 1, februari: 1, february: 1,
+    mar: 2, maret: 2, march: 2,
+    apr: 3, april: 3,
+    mei: 4, may: 4,
+    jun: 5, juni: 5, june: 5,
+    jul: 6, juli: 6, july: 6,
+    agu: 7, agustus: 7, august: 7, aug: 7,
+    sep: 8, september: 8,
+    okt: 9, oktober: 9, october: 9, oct: 9,
+    nov: 10, november: 10,
+    des: 11, desember: 11, december: 11, dec: 11
+  };
+
+  // 1. Cek format ISO (YYYY-MM-DD atau YYYY/MM/DD)
+  const isoMatch = str.match(/^(\d{4})[\-\/](\d{1,2})[\-\/](\d{1,2})$/);
+  if (isoMatch) {
+    return new Date(parseInt(isoMatch[1]), parseInt(isoMatch[2]) - 1, parseInt(isoMatch[3]));
+  }
+
+  // 2. Cek format Lokal (DD/MM/YYYY atau DD-MM-YYYY)
+  const localMatch = str.match(/^(\d{1,2})[\-\/](\d{1,2})[\-\/](\d{4})$/);
+  if (localMatch) {
+    return new Date(parseInt(localMatch[3]), parseInt(localMatch[2]) - 1, parseInt(localMatch[1]));
+  }
+
+  // 3. Cek format Teks Huruf (Contoh: 02 Juli 2025 atau 2 August 2026)
+  const textMatch = str.match(/^(\d{1,2})\s+([a-zA-Z]+)\s+(\d{4})$/);
+  if (textMatch) {
+    const day = parseInt(textMatch[1]);
+    const monthIndex = monthMap[textMatch[2].toLowerCase()];
+    const year = parseInt(textMatch[3]);
+    
+    if (monthIndex !== undefined) {
+      return new Date(year, monthIndex, day);
+    }
+  }
+
+  // Fallback terakhir jika tidak masuk kriteria di atas
+  const fallbackDate = new Date(str);
+  return isNaN(fallbackDate.getTime()) ? null : fallbackDate;
+}
+
 // ==================== STATUS DARI TANGGAL ====================
-// Sheet tidak punya kolom status literal, jadi dihitung dari
-// tanggal masa aktif dibanding hari ini, mirip formula Excel:
-// =IF(tanggal>=TODAY(); "Aktif"; "Tidak Aktif")
 function computeStatus(masaAktifRaw) {
   if (!masaAktifRaw) return "Tidak Aktif";
-  const expiry = new Date(masaAktifRaw);
-  if (isNaN(expiry.getTime())) return "Tidak Aktif";
+  
+  // Menggunakan parser kustom kita yang baru
+  const expiry = parseDateCustom(masaAktifRaw);
+  if (!expiry) return "Tidak Aktif";
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -70,14 +120,13 @@ function computeStatus(masaAktifRaw) {
 
 function formatTanggalIndo(raw) {
   if (!raw) return "";
-  const d = new Date(raw);
-  if (isNaN(d.getTime())) return raw;
+  const d = parseDateCustom(raw);
+  if (!d) return raw;
   const bulan = ["January","February","March","April","May","June","July","August","September","October","November","December"];
   return `${pad(d.getDate(), 2)}-${bulan[d.getMonth()]}-${d.getFullYear()}`;
 }
 
 // ==================== PARSE CSV ====================
-
 const KNOWN_KEYS_BY_HEADER = (lower) => {
   if (lower.includes("perusahaan") || lower === "nama" || lower.includes("nama perusahaan")) return "namaPerusahaan";
   if (lower.includes("kta")) return "noKta";
@@ -113,16 +162,12 @@ function parseCsvToMembers(csvText) {
   const headers = rows[0].map(h => h.trim().replace(/^"|"$/g, ""));
   console.log("Header kolom terdeteksi dari sheet:", headers);
 
-  // tahap 1: mapping key berdasarkan nama header
   const keyByColumn = headers.map((header) => KNOWN_KEYS_BY_HEADER(header.toLowerCase()));
-
   const alreadyHasPhoneColumn = keyByColumn.includes("nomorHandphone");
   const alreadyHasEmailColumn = keyByColumn.includes("email");
 
-  // tahap 2: untuk kolom yang headernya gak ketebak, sniff isinya
-  // di beberapa baris pertama—kalau polanya kayak no. HP / email, pakai itu
   headers.forEach((header, colIndex) => {
-    if (keyByColumn[colIndex]) return; // sudah ketebak dari nama header
+    if (keyByColumn[colIndex]) return;
 
     const sampleValues = rows
       .slice(1, 6)
@@ -154,7 +199,6 @@ function parseCsvToMembers(csvText) {
     headers.forEach((header, index) => {
       const key = keyByColumn[index] || header.trim();
       const raw = values[index] ? values[index].trim().replace(/^"|"$/g, "") : "";
-      // jangan sampai kolom belakangan menimpa field yang sudah keisi duluan
       if (member[key] === undefined || member[key] === "") {
         member[key] = raw;
       }
@@ -169,7 +213,12 @@ function parseCsvToMembers(csvText) {
     }
   }
 
-  members.sort((a, b) => new Date(b.registeredAt || 0) - new Date(a.registeredAt || 0));
+  // Pengurutan juga disesuaikan menggunakan custom parser agar aman
+  members.sort((a, b) => {
+    const dateB = parseDateCustom(b.registeredAt) || new Date(0);
+    const dateA = parseDateCustom(a.registeredAt) || new Date(0);
+    return dateB - dateA;
+  });
 
   if (members[0]) console.log("Contoh data anggota pertama setelah di-parse:", members[0]);
 
@@ -197,7 +246,6 @@ function parseCSVLine(line) {
 }
 
 // ==================== FETCH DATA ====================
-
 async function getMembers() {
   try {
     console.log("Mengambil data dari Google Sheets...");
